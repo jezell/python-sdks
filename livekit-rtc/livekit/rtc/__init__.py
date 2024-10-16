@@ -57,6 +57,7 @@ from .track import (
     Track,
     VideoTrack,
 )
+from .event_emitter import EventEmitter
 from .track_publication import (
     LocalTrackPublication,
     RemoteTrackPublication,
@@ -69,6 +70,8 @@ from .video_frame import (
 )
 from .video_source import VideoSource
 from .video_stream import VideoFrameEvent, VideoStream
+from .audio_resampler import AudioResampler, AudioResamplerQuality
+from .utils import combine_audio_frames
 
 __all__ = [
     "ConnectionQuality",
@@ -127,5 +130,9 @@ __all__ = [
     "VideoStream",
     "ChatManager",
     "ChatMessage",
+    "AudioResampler",
+    "AudioResamplerQuality",
+    "EventEmitter",
+    "combine_audio_frames",
     "__version__",
 ]

@@ -17,9 +17,9 @@ import asyncio
 import ctypes
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Literal, Optional, cast
+from typing import Callable, Dict, Literal, Optional, cast, Mapping
 
-from ._event_emitter import EventEmitter
+from .event_emitter import EventEmitter
 from ._ffi_client import FfiClient, FfiHandle
 from ._proto import ffi_pb2 as proto_ffi
 from ._proto import participant_pb2 as proto_participant
@@ -69,37 +69,47 @@ class RtcConfiguration:
     ice_transport_type: proto_room.IceTransportType.ValueType = (
         proto_room.IceTransportType.TRANSPORT_ALL
     )
+    """Specifies the type of ICE transport to be used (e.g., all, relay, etc.)."""
     continual_gathering_policy: proto_room.ContinualGatheringPolicy.ValueType = (
         proto_room.ContinualGatheringPolicy.GATHER_CONTINUALLY
     )
+    """Policy for continual gathering of ICE candidates."""
     ice_servers: list[proto_room.IceServer] = field(default_factory=list)
+    """List of ICE servers for STUN/TURN. When empty, it uses the default ICE servers provided by
+    the SFU."""
 
 
 @dataclass
 class RoomOptions:
     auto_subscribe: bool = True
+    """Automatically subscribe to tracks when participants join."""
     dynacast: bool = False
-    e2ee: Optional[E2EEOptions] = None
-    rtc_config: Optional[RtcConfiguration] = None
+    e2ee: E2EEOptions | None = None
+    """Options for end-to-end encryption."""
+    rtc_config: RtcConfiguration | None = None
+    """WebRTC-related configuration."""
 
 
 @dataclass
 class DataPacket:
     data: bytes
+    """The payload of the data packet."""
     kind: proto_room.DataPacketKind.ValueType
-    participant: Optional[RemoteParticipant] = (
-        None  # None when the data has been sent by a server SDK
-    )
-    topic: Optional[str] = None
+    """Type of the data packet (e.g., RELIABLE, LOSSY)."""
+    participant: RemoteParticipant | None
+    """Participant who sent the data. None when sent by a server SDK."""
+    topic: str | None = None
+    """Topic associated with the data packet."""
 
 
 @dataclass
 class SipDTMF:
     code: int
+    """DTMF code corresponding to the digit."""
     digit: str
-    participant: Optional[RemoteParticipant] = (
-        None  # None when the data has been sent by a server SDK
-    )
+    """DTMF digit sent."""
+    participant: RemoteParticipant | None = None
+    """Participant who sent the DTMF digit. None when sent by a server SDK."""
 
 
 class ConnectError(Exception):
@@ -109,6 +119,11 @@ class ConnectError(Exception):
 
 class Room(EventEmitter[EventTypes]):
     def __init__(self, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
+        """Initializes a new Room instance.
+
+        Parameters:
+            loop (Optional[asyncio.AbstractEventLoop]): The event loop to use. If not provided, the default event loop is used.
+        """
         super().__init__()
 
         self._ffi_handle: Optional[FfiHandle] = None
@@ -116,9 +131,10 @@ class Room(EventEmitter[EventTypes]):
         self._room_queue = BroadcastQueue[proto_ffi.FfiEvent]()
         self._info = proto_room.RoomInfo()
 
-        self.remote_participants: Dict[str, RemoteParticipant] = {}
-        self.connection_state = ConnectionState.CONN_DISCONNECTED
+        self._remote_participants: Dict[str, RemoteParticipant] = {}
+        self._connection_state = ConnectionState.CONN_DISCONNECTED
         self._first_sid_future = asyncio.Future[str]()
+        self._local_participant: LocalParticipant | None = None
 
     def __del__(self) -> None:
         if self._ffi_handle is not None:
@@ -126,32 +142,186 @@ class Room(EventEmitter[EventTypes]):
 
     @property
     async def sid(self) -> str:
+        """Asynchronously retrieves the session ID (SID) of the room.
+
+        Returns:
+            str: The session ID of the room.
+        """
         if self._info.sid:
             return self._info.sid
 
         return await self._first_sid_future
 
     @property
+    def local_participant(self) -> LocalParticipant:
+        """Gets the local participant in the room.
+
+        Returns:
+            LocalParticipant: The local participant in the room.
+        """
+        if self._local_participant is None:
+            raise Exception("cannot access local participant before connecting")
+
+        return self._local_participant
+
+    @property
+    def connection_state(self) -> ConnectionState.ValueType:
+        """Gets the connection state of the room.
+
+        Returns:
+            ConnectionState: The connection state of the room.
+        """
+        return self._connection_state
+
+    @property
+    def remote_participants(self) -> Mapping[str, RemoteParticipant]:
+        """Gets the remote participants in the room.
+
+        Returns:
+            dict[str, RemoteParticipant]: A dictionary of remote participants indexed by their
+            identity.
+        """
+        return self._remote_participants
+
+    @property
     def name(self) -> str:
+        """Gets the name of the room.
+
+        Returns:
+            str: The name of the room.
+        """
         return self._info.name
 
     @property
     def metadata(self) -> str:
+        """Gets the metadata associated with the room.
+
+        Returns:
+            str: The metadata of the room.
+        """
         return self._info.metadata
 
     @property
     def e2ee_manager(self) -> E2EEManager:
+        """Gets the end-to-end encryption (E2EE) manager for the room.
+
+        Returns:
+            E2EEManager: The E2EE manager instance.
+        """
         return self._e2ee_manager
 
     def isconnected(self) -> bool:
+        """Checks if the room is currently connected.
+
+        Returns:
+            bool: True if connected, False otherwise.
+        """
         return (
             self._ffi_handle is not None
-            and self.connection_state != ConnectionState.CONN_DISCONNECTED
+            and self._connection_state != ConnectionState.CONN_DISCONNECTED
         )
+
+    def on(self, event: EventTypes, callback: Optional[Callable] = None) -> Callable:
+        """Registers an event handler for a specific event type.
+
+        Parameters:
+            event (EventTypes): The name of the event to listen for.
+            callback (Callable): The function to call when the event occurs.
+
+        Returns:
+            Callable: The registered callback function.
+
+        Available events:
+            - **"participant_connected"**: Called when a new participant joins the room.
+                - Arguments: `participant` (RemoteParticipant)
+            - **"participant_disconnected"**: Called when a participant leaves the room.
+                - Arguments: `participant` (RemoteParticipant)
+            - **"local_track_published"**: Called when a local track is published.
+                - Arguments: `publication` (LocalTrackPublication), `track` (Track)
+            - **"local_track_unpublished"**: Called when a local track is unpublished.
+                - Arguments: `publication` (LocalTrackPublication)
+            - **"local_track_subscribed"**: Called when a local track is subscribed.
+                - Arguments: `track` (Track)
+            - **"track_published"**: Called when a remote participant publishes a track.
+                - Arguments: `publication` (RemoteTrackPublication), `participant` (RemoteParticipant)
+            - **"track_unpublished"**: Called when a remote participant unpublishes a track.
+                - Arguments: `publication` (RemoteTrackPublication), `participant` (RemoteParticipant)
+            - **"track_subscribed"**: Called when a track is subscribed.
+                - Arguments: `track` (Track), `publication` (RemoteTrackPublication), `participant` (RemoteParticipant)
+            - **"track_unsubscribed"**: Called when a track is unsubscribed.
+                - Arguments: `track` (Track), `publication` (RemoteTrackPublication), `participant` (RemoteParticipant)
+            - **"track_subscription_failed"**: Called when a track subscription fails.
+                - Arguments: `participant` (RemoteParticipant), `track_sid` (str), `error` (str)
+            - **"track_muted"**: Called when a track is muted.
+                - Arguments: `participant` (Participant), `publication` (TrackPublication)
+            - **"track_unmuted"**: Called when a track is unmuted.
+                - Arguments: `participant` (Participant), `publication` (TrackPublication)
+            - **"active_speakers_changed"**: Called when the list of active speakers changes.
+                - Arguments: `speakers` (list[Participant])
+            - **"room_metadata_changed"**: Called when the room's metadata is updated.
+                - Arguments: `old_metadata` (str), `new_metadata` (str)
+            - **"participant_metadata_changed"**: Called when a participant's metadata is updated.
+                - Arguments: `participant` (Participant), `old_metadata` (str), `new_metadata` (str)
+            - **"participant_name_changed"**: Called when a participant's name is changed.
+                - Arguments: `participant` (Participant), `old_name` (str), `new_name` (str)
+            - **"participant_attributes_changed"**: Called when a participant's attributes change.
+                - Arguments: `changed_attributes` (dict), `participant` (Participant)
+            - **"connection_quality_changed"**: Called when a participant's connection quality changes.
+                - Arguments: `participant` (Participant), `quality` (ConnectionQuality)
+            - **"transcription_received"**: Called when a transcription is received.
+                - Arguments: `segments` (list[TranscriptionSegment]), `participant` (Participant), `publication` (TrackPublication)
+            - **"data_received"**: Called when data is received.
+                - Arguments: `data_packet` (DataPacket)
+            - **"sip_dtmf_received"**: Called when a SIP DTMF signal is received.
+                - Arguments: `sip_dtmf` (SipDTMF)
+            - **"e2ee_state_changed"**: Called when a participant's E2EE state changes.
+                - Arguments: `participant` (Participant), `state` (EncryptionState)
+            - **"connection_state_changed"**: Called when the room's connection state changes.
+                - Arguments: `connection_state` (ConnectionState)
+            - **"connected"**: Called when the room is successfully connected.
+                - Arguments: None
+            - **"disconnected"**: Called when the room is disconnected.
+                - Arguments: `reason` (DisconnectReason)
+            - **"reconnecting"**: Called when the room is attempting to reconnect.
+                - Arguments: None
+            - **"reconnected"**: Called when the room has successfully reconnected.
+                - Arguments: None
+
+        Example:
+            ```python
+            def on_participant_connected(participant):
+                print(f"Participant connected: {participant.identity}")
+
+            room.on("participant_connected", on_participant_connected)
+            ```
+        """
+        return super().on(event, callback)
 
     async def connect(
         self, url: str, token: str, options: RoomOptions = RoomOptions()
     ) -> None:
+        """Connects to a LiveKit room using the specified URL and token.
+
+        Parameters:
+            url (str): The WebSocket URL of the LiveKit server to connect to.
+            token (str): The access token for authentication and authorization.
+            options (RoomOptions, optional): Additional options for the room connection.
+
+        Raises:
+            ConnectError: If the connection fails.
+
+        Example:
+            ```python
+            room = Room()
+
+            # Listen for events before connecting to the room
+            @room.on("participant_connected")
+            def on_participant_connected(participant):
+                print(f"Participant connected: {participant.identity}")
+
+            await room.connect("ws://localhost:7880", "your_token")
+            ```
+        """
         req = proto_ffi.FfiRequest()
         req.connect.url = url
         req.connect.token = token
@@ -207,9 +377,9 @@ class Room(EventEmitter[EventTypes]):
         self._e2ee_manager = E2EEManager(self._ffi_handle.handle, options.e2ee)
 
         self._info = cb.connect.room.info
-        self.connection_state = ConnectionState.CONN_CONNECTED
+        self._connection_state = ConnectionState.CONN_CONNECTED
 
-        self.local_participant = LocalParticipant(
+        self._local_participant = LocalParticipant(
             self._room_queue, cb.connect.local_participant
         )
 
@@ -219,12 +389,13 @@ class Room(EventEmitter[EventTypes]):
             # add the initial remote participant tracks
             for owned_publication_info in pt.publications:
                 publication = RemoteTrackPublication(owned_publication_info)
-                rp.track_publications[publication.sid] = publication
+                rp._track_publications[publication.sid] = publication
 
         # start listening to room events
         self._task = self._loop.create_task(self._listen_task())
 
     async def disconnect(self) -> None:
+        """Disconnects from the room."""
         if not self.isconnected():
             return
 
@@ -274,7 +445,7 @@ class Room(EventEmitter[EventTypes]):
             self.emit("participant_connected", rparticipant)
         elif which == "participant_disconnected":
             identity = event.participant_disconnected.participant_identity
-            rparticipant = self.remote_participants.pop(identity)
+            rparticipant = self._remote_participants.pop(identity)
             self.emit("participant_disconnected", rparticipant)
         elif which == "local_track_published":
             sid = event.local_track_published.track_sid
@@ -291,24 +462,24 @@ class Room(EventEmitter[EventTypes]):
             lpublication._first_subscription.set_result(None)
             self.emit("local_track_subscribed", lpublication.track)
         elif which == "track_published":
-            rparticipant = self.remote_participants[
+            rparticipant = self._remote_participants[
                 event.track_published.participant_identity
             ]
             rpublication = RemoteTrackPublication(event.track_published.publication)
-            rparticipant.track_publications[rpublication.sid] = rpublication
+            rparticipant._track_publications[rpublication.sid] = rpublication
             self.emit("track_published", rpublication, rparticipant)
         elif which == "track_unpublished":
-            rparticipant = self.remote_participants[
+            rparticipant = self._remote_participants[
                 event.track_unpublished.participant_identity
             ]
-            rpublication = rparticipant.track_publications.pop(
+            rpublication = rparticipant._track_publications.pop(
                 event.track_unpublished.publication_sid
             )
             self.emit("track_unpublished", rpublication, rparticipant)
         elif which == "track_subscribed":
             owned_track_info = event.track_subscribed.track
             track_info = owned_track_info.info
-            rparticipant = self.remote_participants[
+            rparticipant = self._remote_participants[
                 event.track_subscribed.participant_identity
             ]
             rpublication = rparticipant.track_publications[track_info.sid]
@@ -327,7 +498,7 @@ class Room(EventEmitter[EventTypes]):
                 )
         elif which == "track_unsubscribed":
             identity = event.track_unsubscribed.participant_identity
-            rparticipant = self.remote_participants[identity]
+            rparticipant = self._remote_participants[identity]
             rpublication = rparticipant.track_publications[
                 event.track_unsubscribed.track_sid
             ]
@@ -337,7 +508,7 @@ class Room(EventEmitter[EventTypes]):
             self.emit("track_unsubscribed", track, rpublication, rparticipant)
         elif which == "track_subscription_failed":
             identity = event.track_subscription_failed.participant_identity
-            rparticipant = self.remote_participants[identity]
+            rparticipant = self._remote_participants[identity]
             error = event.track_subscription_failed.error
             self.emit(
                 "track_subscription_failed",
@@ -497,7 +668,7 @@ class Room(EventEmitter[EventTypes]):
             )
         elif which == "connection_state_changed":
             connection_state = event.connection_state_changed.state
-            self.connection_state = connection_state
+            self._connection_state = connection_state
             self.emit("connection_state_changed", connection_state)
         elif which == "connected":
             self.emit("connected")
@@ -512,7 +683,7 @@ class Room(EventEmitter[EventTypes]):
         self, identity: str
     ) -> Optional[RemoteParticipant]:
         """Retrieve a remote participant by identity"""
-        return self.remote_participants.get(identity, None)
+        return self._remote_participants.get(identity, None)
 
     def _retrieve_participant(self, identity: str) -> Optional[Participant]:
         """Retrieve a local or remote participant by identity"""
@@ -524,9 +695,16 @@ class Room(EventEmitter[EventTypes]):
     def _create_remote_participant(
         self, owned_info: proto_participant.OwnedParticipant
     ) -> RemoteParticipant:
-        if owned_info.info.identity in self.remote_participants:
+        if owned_info.info.identity in self._remote_participants:
             raise Exception("participant already exists")
 
         participant = RemoteParticipant(owned_info)
-        self.remote_participants[participant.identity] = participant
+        self._remote_participants[participant.identity] = participant
         return participant
+
+    def __repr__(self) -> str:
+        sid = "unknown"
+        if self._first_sid_future.done():
+            sid = self._first_sid_future.result()
+
+        return f"rtc.Room(sid={sid}, name={self.name}, metadata={self.metadata}, connection_state={self._connection_state})"
