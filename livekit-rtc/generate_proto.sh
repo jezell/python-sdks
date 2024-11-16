@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
 # This script requires protobuf-compiler and https://github.com/nipunn1313/mypy-protobuf
+# (Used by the build-rtc CI)
 
 FFI_PROTOCOL=./rust-sdks/livekit-ffi/protocol
 FFI_OUT_PYTHON=./livekit/rtc/_proto
@@ -31,10 +33,11 @@ protoc \
     $FFI_PROTOCOL/track.proto \
     $FFI_PROTOCOL/video_frame.proto \
     $FFI_PROTOCOL/e2ee.proto \
-    $FFI_PROTOCOL/stats.proto
+    $FFI_PROTOCOL/stats.proto \
+    $FFI_PROTOCOL/rpc.proto
 
 touch -a "$FFI_OUT_PYTHON/__init__.py"
 
 for f in "$FFI_OUT_PYTHON"/*.py "$FFI_OUT_PYTHON"/*.pyi; do
-    perl -i -pe 's|^(import (audio_frame_pb2\|ffi_pb2\|handle_pb2\|participant_pb2\|room_pb2\|track_pb2\|video_frame_pb2\|e2ee_pb2\|stats_pb2))|from . $1|g' "$f"
+    perl -i -pe 's|^(import (audio_frame_pb2\|ffi_pb2\|handle_pb2\|participant_pb2\|room_pb2\|track_pb2\|video_frame_pb2\|e2ee_pb2\|stats_pb2\|rpc_pb2))|from . $1|g' "$f"
 done

@@ -116,6 +116,7 @@ class VideoFrame:
         info.height = self.height
         info.type = self.type
         info.data_ptr = addr
+        info.stride = 0
 
         if self.type in [
             proto_video.VideoBufferType.ARGB,
@@ -169,7 +170,7 @@ class VideoFrame:
             VideoFrame: A new VideoFrame object in the specified format.
 
         Raises:
-            Exception: If there is an error during the conversion process.
+            Exception: If the conversion isn't supported.
 
         Example:
             Convert a frame from RGBA to I420 format:
@@ -217,7 +218,7 @@ def _get_plane_length(
     type: proto_video.VideoBufferType.ValueType, width: int, height: int
 ) -> int:
     """
-    Return the size in bytes of a participar video buffer type based on its size (This ignore the strides)
+    Return the size in bytes of a participant video buffer type based on its size (This ignores the strides)
     """
     if type in [
         proto_video.VideoBufferType.ARGB,
